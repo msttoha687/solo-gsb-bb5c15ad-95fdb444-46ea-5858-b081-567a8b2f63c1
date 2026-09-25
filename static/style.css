@@ -262,6 +262,43 @@ button:disabled { opacity: 0.45; cursor: default; }
 }
 .svg-host svg .rp-idx.sel { fill: #b45309; font-weight: bold; }
 
+/* ---------------- 印后抽检清单 ---------------- */
+
+.sampling-panel { grid-column: 2; }
+@media (max-width: 900px) { .sampling-panel { grid-column: 1; } }
+
+.sampling-spec-table input.sp-count {
+  width: 90px; margin-top: 0; text-align: right;
+}
+.sampling-actions {
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+  margin: 10px 0;
+}
+.sampling-actions .primary-mini { width: auto; padding-left: 18px; padding-right: 18px; }
+.sampling-total { margin: 8px 0 6px; font-size: 13px; }
+.sampling-total strong { color: var(--ok); }
+.sampling-table td.sp-serial {
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+
+/* 预览 SVG 内的样本高亮层（坐标单位即毫米，随 viewBox 缩放；
+   不拦截鼠标事件，补印点选可同时进行） */
+.svg-host svg .sp-hit {
+  fill: rgba(21, 128, 61, 0.22);
+  stroke: #15803d;
+  stroke-width: 0.45;
+  stroke-dasharray: 2 1;
+  pointer-events: none;
+}
+.svg-host svg .sp-idx {
+  font-family: Arial, sans-serif;
+  font-size: 2.2px;
+  fill: #15803d;
+  font-weight: bold;
+  text-anchor: end;
+  pointer-events: none;
+}
+
 /* ---------------- 纸张库存与领料 ---------------- */
 
 .stock-panel { grid-column: 2; }

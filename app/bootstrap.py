@@ -529,6 +529,135 @@ def main() -> int:
         raise AssertionError("补偿后未选标签出界，整页校验应失败")
     ensure_calibrated_bounds(gp, 1, cal_down, only={0})  # 顶部标签不越界
 
+    # ---- 印后抽检清单：名额轮转、页内均匀取样、边界校验与 CSV ----
+    from .models import SamplingSpecCount
+    from .sampling import build_sampling_csv, build_sampling_list
+
+    # 40×40 纸面 20×20 标签 10 个：每页 4 个（页内序号 1–4），共 3 页（4/4/2）
+    smp_req = LayoutRequest(
+        page_width=40, page_height=40,
+        labels=[LabelSpec(name="测试签", width=20, height=20, count=10,
+                          numbering=_num())],
+    )
+    # 抽 5 张：名额按页码轮流分配（每轮每页最多一张）→ 页1=2、页2=2、页3=1
+    smp = build_sampling_list(smp_req, [SamplingSpecCount(type_index=0, count=5)])
+    assert smp.total == 5
+    got = [(it.page, it.index, it.x, it.y, it.serial) for it in smp.items]
+    # 页1/页2：N=4、q=2 → 第 floor(0.5·4/2)+1=2、floor(1.5·4/2)+1=4 张；
+    # 页3：N=2、q=1 → 第 floor(0.5·2/1)+1=2 张；清单按页码、页内位置排序
+    assert got == [
+        (1, 2, 20, 0, "P-002"), (1, 4, 20, 20, "P-004"),
+        (2, 2, 20, 0, "P-006"), (2, 4, 20, 20, "P-008"),
+        (3, 2, 20, 0, "P-010"),
+    ], got
+
+    # 抽满（q=N 时每页全取）与接近抽满：样本互不重复
+    smp_all = build_sampling_list(smp_req, [SamplingSpecCount(type_index=0, count=10)])
+    assert smp_all.total == 10
+    assert len({(it.page, it.index) for it in smp_all.items}) == 10
+    smp9 = build_sampling_list(smp_req, [SamplingSpecCount(type_index=0, count=9)])
+    assert smp9.total == 9
+    assert len({(it.page, it.index) for it in smp9.items}) == 9
+    # 页1 取满 4 张后跳过后续轮次：页2 获配 3 张，N=4、q=3 → 第 1、3、4 张
+    assert sorted(it.index for it in smp9.items if it.page == 2) == [1, 3, 4]
+    assert sorted(it.index for it in smp9.items if it.page == 3) == [1, 2]
+
+    # 抽检 0 张：该规格不产生样本
+    smp0 = build_sampling_list(smp_req, [SamplingSpecCount(type_index=0, count=0)])
+    assert smp0.total == 0 and smp0.items == []
+
+    # 多规格各自独立抽样（同一页面内交错放置互不影响）
+    smp_ab_req = LayoutRequest(
+        page_width=40, page_height=40,
+        labels=[
+            LabelSpec(name="A签", width=20, height=20, count=2,
+                      numbering=_num("A-", 1, 3)),
+            LabelSpec(name="B签", width=20, height=20, count=2,
+                      numbering=_num("B-", 1, 3)),
+        ],
+    )
+    smp_ab = build_sampling_list(smp_ab_req, [
+        SamplingSpecCount(type_index=0, count=1),
+        SamplingSpecCount(type_index=1, count=1),
+    ])
+    got_ab = [(it.page, it.index, it.x, it.y, it.serial) for it in smp_ab.items]
+    assert got_ab == [(1, 3, 0, 20, "A-002"), (1, 4, 20, 20, "B-002")], got_ab
+
+    # 首张纸占用区不进入候选：样本全部对应实际排入的标签，
+    # 且坐标绝不落在占用区矩形内（占用区本身不是标签，天然被排除）
+    smp_occ_req = LayoutRequest(
+        page_width=210, page_height=297,
+        margin_top=8, margin_right=8, margin_bottom=8, margin_left=8,
+        gap_x=2, gap_y=2,
+        labels=[LabelSpec(name="避让签", width=50, height=30, count=40)],
+        occupied_zones=[OccupiedZone(x=48, y=48, width=100, height=100)],
+    )
+    smp_occ = build_sampling_list(
+        smp_occ_req, [SamplingSpecCount(type_index=0, count=8)]
+    )
+    assert smp_occ.total == 8
+    occ_plan = compute_layout(smp_occ_req)
+    placed_keys = {
+        (pg.page, k + 1) for pg in occ_plan.pages for k in range(len(pg.labels))
+    }
+    assert all((it.page, it.index) in placed_keys for it in smp_occ.items)
+    z = smp_occ_req.occupied_zones[0]
+    for it in smp_occ.items:
+        assert not (
+            it.page == 1
+            and it.x < z.x + z.width and it.x + it.width > z.x
+            and it.y < z.y + z.height and it.y + it.height > z.y
+        ), f"样本落入首张纸占用区: {it}"
+
+    # 未排入份数不进入候选：全部排不下的规格可填 0，填 1 即超上限报错
+    smp_unfit_req = LayoutRequest(
+        page_width=100, page_height=100,
+        labels=[LabelSpec(name="巨签", width=200, height=200, count=3)],
+    )
+    assert build_sampling_list(
+        smp_unfit_req, [SamplingSpecCount(type_index=0, count=0)]
+    ).total == 0
+
+    def _expect_sampling_error(samples, key, req=smp_req) -> None:
+        try:
+            build_sampling_list(req, samples)
+        except ValueError as exc:
+            assert key in str(exc), f"错误信息未包含「{key}」: {exc}"
+            return
+        raise AssertionError(f"抽检设置应被拦截（{key}）却生成了清单")
+
+    _expect_sampling_error(
+        [SamplingSpecCount(type_index=0, count=11)], "超过该规格实际排入数"
+    )
+    _expect_sampling_error(
+        [SamplingSpecCount(type_index=0, count=1)], "超过该规格实际排入数",
+        req=smp_unfit_req,
+    )
+    _expect_sampling_error(
+        [
+            SamplingSpecCount(type_index=0, count=1),
+            SamplingSpecCount(type_index=0, count=2),
+        ],
+        "重复填写",
+    )
+    _expect_sampling_error(
+        [SamplingSpecCount(type_index=5, count=1)], "超出范围"
+    )
+    _expect_sampling_error(
+        [SamplingSpecCount(type_index=0, count=-1)], "不能为负数"
+    )
+
+    # CSV：带 BOM 的中文表头 + 与清单一致的数据行（含坐标与流水号）
+    csv_text = build_sampling_csv(smp)
+    assert csv_text.startswith("\ufeff")
+    csv_lines = [ln for ln in csv_text.split("\r\n") if ln]
+    assert csv_lines[0] == (
+        "\ufeff序号,页码,页内序号,规格,X (mm),Y (mm),宽 (mm),高 (mm),流水号"
+    )
+    assert len(csv_lines) == 6  # 表头 + 5 张样本
+    assert "1,1,2,测试签,20,0,20,20,P-002" in csv_lines
+    assert "5,3,2,测试签,20,0,20,20,P-010" in csv_lines
+
     # ---- 纸张库存与领料：登记、事务扣纸、幂等重试、冲突与库存不足 ----
     from .db import connect as db_connect, create_schema
     from .stock import (

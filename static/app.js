@@ -9,6 +9,8 @@ let currentPage = 1;
 let calibrationData = null;  // 已通过求解校验的校准录入（导出时随 /api/svg 发送）
 let reprintMode = false;     // 原位补印模式开关
 const reprintSel = new Map(); // 补印选择：页码 -> Set（0 基页内序号）；界面角标与 API 序号为 +1
+let samplingItems = null;    // 最近一次 /api/sampling 返回的抽检清单（items 数组）
+let samplingBody = null;     // 生成该清单时使用的请求体（下载 CSV 复用，保证清单与 CSV 一致）
 
 /* ---------------- 标签行 ---------------- */
 
@@ -202,6 +204,7 @@ async function renderPage() {
     const svg = await fetchSvg(currentPage, { showOccupied: true });
     host.innerHTML = svg;
     if (reprintMode) applyReprintOverlay();
+    applySamplingOverlay();
   } catch (err) {
     host.innerHTML =
       `<div class="svg-error"><strong>无法生成本页 SVG：</strong>${escapeHtml(err.message)}</div>`;
@@ -319,6 +322,178 @@ async function exportReprintSvg() {
     alert(err.message);
   }
 }
+
+/* ---------------- 印后抽检清单 ---------------- */
+
+function rebuildSamplingPanel(plan) {
+  // 按最新拼版结果重建各规格的抽检张数输入（默认 0，上限为实际排入数），
+  // 并清空旧清单：拼版参数变化后必须按新结果重新生成，不沿用旧位置
+  const tbody = $("sampling-spec-rows");
+  tbody.innerHTML = plan.summaries
+    .map(
+      (s, i) => `
+      <tr>
+        <td>${escapeHtml(s.name || `#${i + 1}`)}</td>
+        <td>${s.width} × ${s.height}</td>
+        <td>${s.placed}</td>
+        <td><input type="number" class="sp-count" data-idx="${i}" value="0"
+             min="0" max="${s.placed}" step="1" ${s.placed === 0 ? "disabled" : ""}
+             title="可填 0–${s.placed}，不得超过该规格实际排入数" /></td>
+      </tr>`
+    )
+    .join("");
+  clearSamplingResult();
+}
+
+function clearSamplingResult() {
+  samplingItems = null;
+  samplingBody = null;
+  $("sampling-result").innerHTML = "";
+  $("sampling-csv").disabled = true;
+  $("sampling-note").textContent = "";
+  removeSamplingOverlay();
+}
+
+function collectSamplingCounts() {
+  // 读取各规格抽检张数并前端校验；返回 { samples } 或 { error }
+  const samples = [];
+  for (const input of document.querySelectorAll(".sp-count")) {
+    const i = parseInt(input.dataset.idx, 10);
+    const s = lastPlan.summaries[i];
+    const name = s.name || `#${i + 1}`;
+    const c = parseFloat(input.value);
+    if (!Number.isInteger(c) || c < 0) {
+      return { error: `规格「${name}」的抽检张数必须是不小于 0 的整数（可填 0 表示不抽检）。` };
+    }
+    if (c > s.placed) {
+      return { error: `规格「${name}」抽检张数 ${c} 超过该规格实际排入数 ${s.placed}：请改为 0–${s.placed} 之间的整数。` };
+    }
+    samples.push({ type_index: i, count: c });
+  }
+  return { samples };
+}
+
+async function generateSampling() {
+  if (!lastPlan || !lastParams) return;
+  const { samples, error } = collectSamplingCounts();
+  if (error) { alert(error); return; }
+  const body = { params: lastParams, samples };
+  let resp;
+  try {
+    resp = await fetch("/api/sampling", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    $("sampling-result").innerHTML =
+      `<div class="req-result err"><strong>请求失败：</strong>${escapeHtml(err.message)}</div>`;
+    return;
+  }
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    clearSamplingResult();
+    const detail = Array.isArray(data.detail)
+      ? data.detail.map((d) => d.msg).join("；")
+      : data.detail;
+    $("sampling-result").innerHTML =
+      `<div class="req-result err"><strong>无法生成抽检清单：</strong>${escapeHtml(detail || "未知错误")}</div>`;
+    return;
+  }
+  samplingItems = data.items;
+  samplingBody = body; // 下载 CSV 复用同一请求体，保证清单与 CSV 一致
+  renderSamplingResult(data);
+  $("sampling-csv").disabled = false;
+  $("sampling-note").textContent = "";
+  applySamplingOverlay();
+}
+
+function renderSamplingResult(data) {
+  const host = $("sampling-result");
+  if (!data.total) {
+    host.innerHTML =
+      `<div class="req-result muted">各规格抽检张数均为 0：本次无需抽检。</div>`;
+    return;
+  }
+  let html = `<div class="sampling-total">本次共抽检 <strong>${data.total}</strong> 张成品
+      （按页码、页内位置排序；预览中绿色高亮为样本位置）：</div>
+    <div class="stock-table-wrap"><table class="stock-table sampling-table">
+      <thead><tr>
+        <th>序号</th><th>页码</th><th>页内序号</th><th>规格</th>
+        <th>X (mm)</th><th>Y (mm)</th><th>宽×高 (mm)</th><th>流水号</th>
+      </tr></thead><tbody>`;
+  data.items.forEach((it, k) => {
+    html += `<tr>
+      <td>${k + 1}</td>
+      <td>${it.page}</td>
+      <td>#${it.index}</td>
+      <td>${escapeHtml(it.name || `#${it.type_index + 1}`)}</td>
+      <td>${it.x}</td>
+      <td>${it.y}</td>
+      <td>${it.width} × ${it.height}</td>
+      <td class="sp-serial">${it.serial ? escapeHtml(it.serial) : "—"}</td>
+    </tr>`;
+  });
+  html += "</tbody></table></div>";
+  host.innerHTML = html;
+}
+
+function applySamplingOverlay() {
+  removeSamplingOverlay();
+  if (!samplingItems || !samplingItems.length) return;
+  if (!$("sampling-highlight").checked) return;
+  const svg = document.querySelector("#svg-host svg");
+  if (!svg) return;
+  const layer = document.createElementNS(SVG_NS, "g");
+  layer.setAttribute("class", "sampling-layer");
+  samplingItems.forEach((it, k) => {
+    if (it.page !== currentPage) return;
+    const rect = document.createElementNS(SVG_NS, "rect");
+    rect.setAttribute("class", "sp-hit");
+    rect.setAttribute("x", it.x);
+    rect.setAttribute("y", it.y);
+    rect.setAttribute("width", it.width);
+    rect.setAttribute("height", it.height);
+    const tag = document.createElementNS(SVG_NS, "text");
+    tag.setAttribute("class", "sp-idx");
+    tag.setAttribute("x", it.x + it.width - 0.9);
+    tag.setAttribute("y", it.y + it.height - 0.9);
+    tag.textContent = `检${k + 1}`; // 与清单「序号」列对应
+    layer.appendChild(rect);
+    layer.appendChild(tag);
+  });
+  svg.appendChild(layer);
+}
+
+function removeSamplingOverlay() {
+  document.querySelectorAll("#svg-host g.sampling-layer").forEach((g) => g.remove());
+}
+
+$("sampling-generate").addEventListener("click", generateSampling);
+$("sampling-highlight").addEventListener("change", applySamplingOverlay);
+// 抽检张数修改后旧清单失效（不沿用旧位置），需重新生成
+$("sampling-spec-rows").addEventListener("input", (e) => {
+  if (!e.target.classList || !e.target.classList.contains("sp-count")) return;
+  if (samplingItems) {
+    clearSamplingResult();
+    $("sampling-note").textContent = "抽检张数已修改，请重新「生成抽检清单」。";
+  }
+});
+$("sampling-csv").addEventListener("click", async () => {
+  if (!samplingBody) return;
+  try {
+    const resp = await fetch("/api/sampling/csv", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(samplingBody),
+    });
+    if (!resp.ok) throw new Error(await apiError(resp, "CSV 生成失败"));
+    // 直接下载原始字节，保留 UTF-8 BOM（Excel 据此识别中文表头）
+    downloadBlob(await resp.blob(), "sampling-list.csv", "text/csv;charset=utf-8");
+  } catch (err) {
+    alert(err.message);
+  }
+});
 
 /* ---------------- 结果汇总 ---------------- */
 
@@ -541,10 +716,15 @@ $("params-form").addEventListener("submit", async (e) => {
     reprintSel.clear();
     renderSummary(lastPlan);
     $("preview-wrap").hidden = false;
+    // 拼版结果已变化：按新结果重建抽检张数输入并清空旧清单（不沿用旧位置）
+    rebuildSamplingPanel(lastPlan);
+    $("sampling-panel").hidden = false;
     await renderPage();
   } catch (err) {
     lastPlan = null;
     $("preview-wrap").hidden = true;
+    $("sampling-panel").hidden = true;
+    clearSamplingResult();
     $("summary").className = "summary";
     $("summary").innerHTML =
       `<div class="warn"><strong>参数错误：</strong>${escapeHtml(err.message)}</div>`;
@@ -580,8 +760,10 @@ $("reprint-clear").addEventListener("click", () => {
 });
 $("reprint-export").addEventListener("click", exportReprintSvg);
 
-function downloadBlob(text, filename, type) {
-  const blob = new Blob([text], { type });
+function downloadBlob(content, filename, type) {
+  // content 为 Blob 时直接使用（保留原始字节，如 CSV 的 UTF-8 BOM；
+  // 若先 resp.text() 再转 Blob，BOM 会被解码步骤剥掉）
+  const blob = content instanceof Blob ? content : new Blob([content], { type });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = filename;

@@ -138,6 +138,30 @@
       </div>
     </section>
 
+    <!-- 印后抽检清单（显示在拼版结果下方，与预览同列） -->
+    <section class="panel sampling-panel" id="sampling-panel" hidden>
+      <h2 class="panel-title">印后抽检清单</h2>
+      <p class="hint">为每种规格填写要抽检的<strong>成品张数</strong>（可填 0，不得超过该规格实际排入数）。
+        服务端基于当前拼版结果，按页码轮流给含该规格的页面分配名额（每轮每页最多一张），
+        获配 q 张的页面在 N 个页内候选（从上到下、同行从左到右）中取第 floor((j+0.5)·N/q)+1 张；
+        首张纸占用区与未排入份数不会进入候选。清单列出页码、页内序号、规格、坐标与流水号，
+        预览中以绿色高亮样本，可下载 CSV。修改拼版参数并重新「生成拼版」后清单自动清空，
+        需按新结果重新生成（不沿用旧位置）。</p>
+      <div class="stock-table-wrap">
+        <table class="stock-table sampling-spec-table">
+          <thead><tr><th>规格</th><th>尺寸 (mm)</th><th>实际排入</th><th>抽检张数</th></tr></thead>
+          <tbody id="sampling-spec-rows"></tbody>
+        </table>
+      </div>
+      <div class="sampling-actions">
+        <button type="button" id="sampling-generate" class="primary-mini">生成抽检清单</button>
+        <button type="button" id="sampling-csv" class="ghost-mini" disabled>下载 CSV</button>
+        <label class="inline"><input type="checkbox" id="sampling-highlight" checked /> 预览中高亮样本</label>
+        <span id="sampling-note" class="hint-inline"></span>
+      </div>
+      <div id="sampling-result"></div>
+    </section>
+
     <!-- 纸张库存与领料（跨整行，显示在拼版结果下方） -->
     <section class="panel stock-panel">
       <h2 class="panel-title">纸张库存与领料</h2>

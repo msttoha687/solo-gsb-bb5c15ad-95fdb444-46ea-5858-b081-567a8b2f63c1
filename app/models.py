@@ -204,6 +204,63 @@ class ReprintRequest(BaseModel):
     )
 
 
+# ---------------- 印后抽检清单 ----------------
+
+
+class SamplingSpecCount(BaseModel):
+    """一种规格要抽检的成品张数。
+
+    可填 0（该规格不抽检），但不得超过该规格在完整拼版中的实际排入数；
+    具体上限由服务端按当前拼版结果校验（负数 / 超上限返回明确中文错误）。
+    """
+
+    type_index: int = Field(..., description="规格序号（0 基，对应 labels 顺序）")
+    count: int = Field(..., description="要抽检的成品张数，0 表示不抽检")
+
+
+class SamplingRequest(BaseModel):
+    """印后抽检清单请求：拼版参数与 /api/layout 完全一致，附带每种规格
+    要抽检的成品张数。
+
+    服务端基于完整拼版结果抽样：按页码轮流给含该规格标签的页面分配名额
+    （每轮每页最多一张），获配 q 张的页面在 N 个页内候选（从上到下、
+    同行从左到右排序）中取第 floor((j+0.5)*N/q)+1 张（j 从 0 到 q-1）。
+    首张纸占用区与未排入份数不会进入候选。
+    """
+
+    params: LayoutRequest
+    samples: list[SamplingSpecCount] = Field(
+        default_factory=list,
+        description="每种规格要抽检的成品张数；同一规格只能出现一次",
+    )
+
+
+class SamplingItem(BaseModel):
+    """一张被抽中的成品样本（毫米坐标，原点为纸张左上角）。
+
+    index 为页内序号（从 1 开始，与 /api/layout 返回的 pages[].labels[]
+    顺序一致，即预览角标 / 补印使用的同一序号）；serial 为该标签在完整
+    拼版中的流水号（未启用编号的规格为 null）。
+    """
+
+    page: int
+    index: int
+    type_index: int
+    name: str
+    x: float
+    y: float
+    width: float
+    height: float
+    serial: str | None = None
+
+
+class SamplingResponse(BaseModel):
+    """抽检清单：按页码、页内从上到下再从左到右排序。"""
+
+    items: list[SamplingItem]
+    total: int = Field(..., description="本次抽检成品总张数")
+
+
 # ---------------- 纸张库存与领料 ----------------
 
 

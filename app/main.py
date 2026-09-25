@@ -25,10 +25,13 @@ from .models import (
     RequisitionResult,
     RequisitionVoidRequest,
     ReprintRequest,
+    SamplingRequest,
+    SamplingResponse,
     StockItem,
     StockRegisterRequest,
     SvgRequest,
 )
+from .sampling import build_sampling_csv, build_sampling_list
 from .stock import (
     StockConflict,
     RequisitionNotFound,
@@ -46,7 +49,7 @@ _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 # 由 SQLite 写锁 + BEGIN IMMEDIATE 保证领料事务的并发正确
 init_db()
 
-app = FastAPI(title="小批量标签拼版工具", version="1.5.0")
+app = FastAPI(title="小批量标签拼版工具", version="1.6.0")
 
 
 @app.get("/health", tags=["meta"])
@@ -160,6 +163,43 @@ def api_calibration_solve(req: CalibrationData) -> Calibration:
         return solve_calibration(req)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ---------------- 印后抽检清单 ----------------
+
+
+@app.post("/api/sampling", response_model=SamplingResponse, tags=["sampling"])
+def api_sampling(req: SamplingRequest) -> SamplingResponse:
+    """印后抽检清单：服务端按当前拼版参数重算完整拼版，为每种规格抽取
+    要抽检的成品样本。
+
+    - 名额按页码轮流分配给含该规格标签的页面（每轮每页最多一张）；
+    - 获配 q 张的页面在 N 个页内候选（从上到下、同行从左到右）中取
+      第 floor((j+0.5)*N/q)+1 张（j 从 0 到 q-1）；
+    - 首张纸占用区与未排入份数不进入候选；
+    - 抽检张数可填 0，超过该规格实际排入数返回 HTTP 400。
+    """
+    try:
+        return build_sampling_list(req.params, req.samples)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/sampling/csv", tags=["sampling"])
+def api_sampling_csv(req: SamplingRequest) -> Response:
+    """下载抽检清单 CSV（UTF-8 带 BOM）：与 /api/sampling 同一请求体、
+    同一抽样结果，列为序号、页码、页内序号、规格、坐标与流水号。"""
+    try:
+        result = build_sampling_list(req.params, req.samples)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(
+        content=build_sampling_csv(result),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="sampling-list.csv"'
+        },
+    )
 
 
 # ---------------- 纸张库存与领料 ----------------
