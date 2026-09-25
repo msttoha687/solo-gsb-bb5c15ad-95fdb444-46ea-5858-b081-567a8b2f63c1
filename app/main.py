@@ -15,10 +15,13 @@ from .calibration import (
     solve_calibration,
 )
 from .db import db_session, init_db
+from .inspection import build_inspection_csv, build_inspection_from_request
 from .layout import compute_layout
 from .models import (
     Calibration,
     CalibrationData,
+    InspectionRequest,
+    InspectionResponse,
     LayoutRequest,
     LayoutResponse,
     RequisitionConfirmRequest,
@@ -46,7 +49,7 @@ _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 # 由 SQLite 写锁 + BEGIN IMMEDIATE 保证领料事务的并发正确
 init_db()
 
-app = FastAPI(title="小批量标签拼版工具", version="1.5.0")
+app = FastAPI(title="小批量标签拼版工具", version="1.6.0")
 
 
 @app.get("/health", tags=["meta"])
@@ -160,6 +163,45 @@ def api_calibration_solve(req: CalibrationData) -> Calibration:
         return solve_calibration(req)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ---------------- 印后抽检清单 ----------------
+
+
+@app.post(
+    "/api/inspection",
+    response_model=InspectionResponse,
+    tags=["inspection"],
+)
+def api_inspection(req: InspectionRequest) -> InspectionResponse:
+    """生成印后抽检清单：服务端按 params 重算完整拼版后均匀抽取已排入成品。
+
+    每张纸的首张占用区与未排入份数都不在拼版结果内，天然不进入候选；
+    名额按页码轮流分配到含该规格的页面（每轮每页最多 1 张），页内按
+    floor((j+0.5)N/q)+1 均匀定位。抽验张数为 0 允许，超过实际排入数
+    返回 HTTP 400 明确中文错误。
+    """
+    try:
+        return build_inspection_from_request(req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/inspection.csv", tags=["inspection"])
+def api_inspection_csv(req: InspectionRequest) -> Response:
+    """与 /api/inspection 同参数，直接下载清单 CSV（UTF-8 BOM，Excel 可打开）。"""
+    try:
+        resp = build_inspection_from_request(req)
+        csv_text = build_inspection_csv(resp)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(
+        content=csv_text,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="inspection-list.csv"'
+        },
+    )
 
 
 # ---------------- 纸张库存与领料 ----------------

@@ -292,3 +292,66 @@ class RequisitionVoidRequest(BaseModel):
     order_no: str = Field(
         ..., min_length=1, max_length=40, description="需要作废的领料单号"
     )
+
+
+# ---------------- 印后抽检清单 ----------------
+
+
+class InspectionRequest(BaseModel):
+    """印后抽检清单请求：拼版参数 + 每种规格的抽验成品张数。
+
+    samples[i] 与 params.labels[i] 一一对应；可填 0，但不得超过该规格
+    的**实际排入数**（未排入份数、首张纸占用区都不进入候选）。服务端
+    基于 params 重新计算完整拼版后按页码轮流分配，绝不沿用旧位置。
+    """
+
+    params: LayoutRequest
+    samples: list[int] = Field(
+        ...,
+        min_length=1,
+        description="每种规格抽验张数（与 labels 顺序一致，从 0 开始）",
+    )
+
+
+class InspectionItem(BaseModel):
+    """清单中的一条抽验样本（定位到完整拼版中的单个已排入标签）。
+
+    page_index 为页内**阅读顺序**（从上到下成行、同行从左到右）序号，
+    从 1 开始；x/y 为标签左上角毫米坐标；serial 为该标签的已有流水号，
+    未启用编号的规格为 null。
+    """
+
+    page: int
+    page_index: int
+    type_index: int
+    name: str
+    width: float
+    height: float
+    rotated: bool
+    x: float
+    y: float
+    serial: str | None = None
+
+
+class InspectionSpecSummary(BaseModel):
+    """一种规格的抽检名额与候选（实际排入）数量汇总。"""
+
+    type_index: int
+    name: str
+    requested: int = Field(..., description="需求份数")
+    placed: int = Field(..., description="实际排入份数（候选总数）")
+    sampled: int = Field(..., description="本次实际分配到的抽验张数")
+    pages_used: int = Field(
+        ..., description="该规格候选分布在多少张纸（含该规格标签的页数）"
+    )
+
+
+class InspectionResponse(BaseModel):
+    """印后抽检清单：样本按页码升序、页内阅读顺序排列。"""
+
+    items: list[InspectionItem]
+    summaries: list[InspectionSpecSummary]
+    total_samples: int = Field(..., description="全部规格抽验张数之和")
+    total_pages: int = Field(..., description="本次拼版实际页数")
+    page_width: float
+    page_height: float

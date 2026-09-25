@@ -9,6 +9,7 @@ let currentPage = 1;
 let calibrationData = null;  // 已通过求解校验的校准录入（导出时随 /api/svg 发送）
 let reprintMode = false;     // 原位补印模式开关
 const reprintSel = new Map(); // 补印选择：页码 -> Set（0 基页内序号）；界面角标与 API 序号为 +1
+let lastInspection = null;   // 最近一次 /api/inspection 返回的抽检清单（随拼版重算失效）
 
 /* ---------------- 标签行 ---------------- */
 
@@ -202,6 +203,7 @@ async function renderPage() {
     const svg = await fetchSvg(currentPage, { showOccupied: true });
     host.innerHTML = svg;
     if (reprintMode) applyReprintOverlay();
+    applyInspectionOverlay();
   } catch (err) {
     host.innerHTML =
       `<div class="svg-error"><strong>无法生成本页 SVG：</strong>${escapeHtml(err.message)}</div>`;
@@ -320,6 +322,196 @@ async function exportReprintSvg() {
   }
 }
 
+/* ---------------- 印后抽检清单 ---------------- */
+
+function resetInspection() {
+  // 拼版重新生成（或生成失败）：旧清单失效，必须基于新结果重算
+  lastInspection = null;
+  $("insp-table-wrap").hidden = true;
+  $("insp-csv").disabled = true;
+  $("insp-status").className = "insp-status muted";
+  $("insp-status").textContent = "填写抽检张数后点击「生成抽检清单」。";
+  removeInspectionOverlay();
+}
+
+function collectSamples() {
+  // 与 plan.summaries 顺序一致；未渲染（尚无拼版）时返回 null
+  if (!lastPlan) return null;
+  const vals = new Map();
+  document.querySelectorAll(".sample-count").forEach((inp) => {
+    vals.set(parseInt(inp.dataset.type, 10), inp.value);
+  });
+  return lastPlan.summaries.map((s) => {
+    const raw = vals.get(s.type_index);
+    const v = raw === undefined || raw.trim() === "" ? 0 : parseInt(raw, 10);
+    return v;
+  });
+}
+
+function inspNote(kind, html) {
+  const el = $("insp-status");
+  el.className = `insp-status ${kind}`;
+  el.innerHTML = html;
+}
+
+async function generateInspection() {
+  if (!lastParams || !lastPlan) {
+    alert("请先生成拼版，再创建抽检清单。");
+    return;
+  }
+  const samples = collectSamples();
+  // 前端先做 0–实际排入数 校验，服务端仍会独立重算并复核
+  for (const [i, v] of samples.entries()) {
+    const s = lastPlan.summaries[i];
+    if (!Number.isInteger(v) || v < 0) {
+      alert(`规格「${s.name || i + 1}」的抽检张数必须是不小于 0 的整数。`);
+      return;
+    }
+    if (v > s.placed) {
+      alert(`规格「${s.name || i + 1}」抽检 ${v} 张，超过实际排入数 ${s.placed} 张。`);
+      return;
+    }
+  }
+  inspNote("muted", "正在由服务端按完整拼版重新计算抽检样本…");
+  let resp;
+  try {
+    resp = await fetch("/api/inspection", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ params: lastParams, samples }),
+    });
+  } catch (err) {
+    inspNote("err", `<strong>请求失败：</strong>${escapeHtml(err.message)}`);
+    return;
+  }
+  if (!resp.ok) {
+    lastInspection = null;
+    $("insp-table-wrap").hidden = true;
+    $("insp-csv").disabled = true;
+    removeInspectionOverlay();
+    inspNote("err", `<strong>无法生成抽检清单：</strong>${escapeHtml(await apiError(resp, "抽检清单生成失败"))}`);
+    return;
+  }
+  lastInspection = await resp.json();
+  renderInspectionTable(lastInspection);
+  $("insp-table-wrap").hidden = false;
+  $("insp-csv").disabled = lastInspection.total_samples === 0;
+  const total = lastInspection.total_samples;
+  const perSpec = lastInspection.summaries
+    .filter((s) => s.sampled > 0)
+    .map((s) => `${escapeHtml(s.name || `#${s.type_index + 1}`)} ${s.sampled}/${s.placed}`)
+    .join("，");
+  inspNote("ok",
+    `共抽检 <strong>${total}</strong> 张成品，分布于 <strong>${lastInspection.total_pages}</strong> 张纸` +
+    (perSpec ? `（${perSpec}）` : "") +
+    "；预览中绿色描边为抽检样本，点击清单行可跳到对应页。");
+  applyInspectionOverlay();
+}
+
+function renderInspectionTable(data) {
+  const tbody = $("insp-rows");
+  if (!data.items.length) {
+    tbody.innerHTML =
+      `<tr class="empty-row"><td colspan="9">所有规格抽检张数均为 0：没有抽检样本。</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = data.items.map((it, k) => `
+    <tr class="insp-row" data-page="${it.page}" title="点击跳转到第 ${it.page} 页">
+      <td>${k + 1}</td>
+      <td>${it.page}</td>
+      <td>${it.page_index}</td>
+      <td>${escapeHtml(it.name || `#${it.type_index + 1}`)}</td>
+      <td>${it.x}</td>
+      <td>${it.y}</td>
+      <td>${it.width} × ${it.height}</td>
+      <td>${it.rotated ? "↻ 90°" : "—"}</td>
+      <td>${it.serial ? `<span class="num-range">${escapeHtml(it.serial)}</span>` : "—"}</td>
+    </tr>`).join("");
+}
+
+async function downloadInspectionCsv() {
+  if (!lastParams) return;
+  const samples = collectSamples();
+  try {
+    const resp = await fetch("/api/inspection.csv", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ params: lastParams, samples }),
+    });
+    if (!resp.ok) {
+      alert(await apiError(resp, "抽检 CSV 生成失败"));
+      return;
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "inspection-list.csv";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+function applyInspectionOverlay() {
+  removeInspectionOverlay();
+  if (!lastPlan || !lastInspection || !$("insp-highlight").checked) return;
+  const host = $("svg-host");
+  const svg = host.querySelector("svg");
+  if (!svg) return;
+  const layer = document.createElementNS(SVG_NS, "g");
+  layer.setAttribute("class", "insp-layer");
+  for (const it of lastInspection.items) {
+    if (it.page !== currentPage) continue;
+    const rect = document.createElementNS(SVG_NS, "rect");
+    rect.setAttribute("class", "insp-mark");
+    rect.setAttribute("x", it.x);
+    rect.setAttribute("y", it.y);
+    rect.setAttribute("width", it.width);
+    rect.setAttribute("height", it.height);
+    layer.appendChild(rect);
+    // 右上角小角标，避免与流水号（居中）重叠
+    if (Math.min(it.width, it.height) >= 8) {
+      const tag = document.createElementNS(SVG_NS, "text");
+      tag.setAttribute("class", "insp-tag");
+      tag.setAttribute("x", Math.max(it.x + 0.9, it.x + it.width - 4.2));
+      tag.setAttribute("y", it.y + 2.6);
+      tag.textContent = "检";
+      layer.appendChild(tag);
+    }
+  }
+  svg.appendChild(layer);
+}
+
+function removeInspectionOverlay() {
+  document.querySelectorAll("#svg-host g.insp-layer").forEach((g) => g.remove());
+}
+
+$("insp-generate").addEventListener("click", generateInspection);
+$("insp-csv").addEventListener("click", downloadInspectionCsv);
+$("insp-highlight").addEventListener("change", applyInspectionOverlay);
+// 点击清单行：跳到样本所在页（高亮随页刷新自动重绘）
+$("insp-rows").addEventListener("click", (e) => {
+  const row = e.target.closest ? e.target.closest(".insp-row") : null;
+  if (!row || !lastPlan) return;
+  const page = parseInt(row.dataset.page, 10);
+  if (page >= 1 && page <= lastPlan.pages.length && page !== currentPage) {
+    currentPage = page;
+    renderPage();
+  }
+});
+// 修改任何规格的抽检张数后，旧清单不再与输入一致，提示需重新生成
+document.addEventListener("input", (e) => {
+  if (e.target.classList && e.target.classList.contains("sample-count") && lastInspection) {
+    lastInspection = null;
+    $("insp-table-wrap").hidden = true;
+    $("insp-csv").disabled = true;
+    removeInspectionOverlay();
+    inspNote("muted", "抽检张数已修改，请重新点击「生成抽检清单」。");
+  }
+});
+
 /* ---------------- 结果汇总 ---------------- */
 
 function renderSummary(plan) {
@@ -337,7 +529,7 @@ function renderSummary(plan) {
     </div>
     <table>
       <thead><tr>
-        <th>标签</th><th>规格 (mm)</th><th>需求</th><th>排入</th><th>其中旋转</th><th>未排入</th><th>本次编号范围</th>
+        <th>标签</th><th>规格 (mm)</th><th>需求</th><th>排入</th><th>其中旋转</th><th>未排入</th><th>本次编号范围</th><th>抽检张数</th>
       </tr></thead><tbody>`;
   for (const s of plan.summaries) {
     let range = "—";
@@ -358,6 +550,12 @@ function renderSummary(plan) {
       <td>${s.rotated}</td>
       <td>${s.unplaced > 0 ? s.unplaced : "—"}</td>
       <td class="num-cell-out">${range}</td>
+      <td class="sample-cell-out">
+        <input type="number" class="sample-count" data-type="${s.type_index}"
+               value="0" min="0" max="${s.placed}" step="1"
+               title="本规格抽检成品张数（0–${s.placed}，占用区与未排入份数不参与）"
+               ${s.placed === 0 ? "disabled" : ""} />
+      </td>
     </tr>`;
   }
   html += "</tbody></table>";
@@ -537,14 +735,19 @@ $("params-form").addEventListener("submit", async (e) => {
         : detail);
     }
     lastPlan = await resp.json();
-    // 参数已重新提交：旧页码 / 页内序号可能失效，清空全部补印选择
+    // 参数已重新提交：旧页码 / 页内序号可能失效，清空全部补印选择；
+    // 抽检清单同样按新拼版重新生成，不沿用旧位置
     reprintSel.clear();
+    resetInspection();
     renderSummary(lastPlan);
     $("preview-wrap").hidden = false;
+    $("inspection-panel").hidden = false;
     await renderPage();
   } catch (err) {
     lastPlan = null;
+    resetInspection();
     $("preview-wrap").hidden = true;
+    $("inspection-panel").hidden = true;
     $("summary").className = "summary";
     $("summary").innerHTML =
       `<div class="warn"><strong>参数错误：</strong>${escapeHtml(err.message)}</div>`;

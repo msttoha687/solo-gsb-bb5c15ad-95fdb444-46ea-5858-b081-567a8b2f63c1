@@ -136,6 +136,35 @@
         </div>
         <div id="svg-host" class="svg-host"></div>
       </div>
+
+      <!-- 印后抽检清单（基于本次拼版结果；重新生成拼版后自动失效重算） -->
+      <div id="inspection-panel" class="inspection-panel" hidden>
+        <h2 class="panel-title">印后抽检清单</h2>
+        <p class="hint">在上方汇总表「抽检张数」列为本轮每种规格填写要抽检的<strong>成品张数</strong>
+          （可填 0，不得超过该规格实际排入数；首张纸占用区与未排入份数不进入候选）。
+          服务端按完整拼版重算：名额按<strong>页码轮流</strong>分配到含该规格的页面（每轮每页最多 1 张），
+          页内再按<strong>从上到下、同行从左到右</strong>均匀定位；清单给出页码、页内序号、规格、
+          左上角坐标与已有流水号，并可在预览中高亮、下载 CSV。修改拼版参数后请重新「生成拼版」，
+          清单按新结果重算，不沿用旧位置。</p>
+        <div class="insp-actions">
+          <label class="inline" title="在当前预览页上用绿色描边标出抽检样本">
+            <input type="checkbox" id="insp-highlight" checked /> 预览高亮抽检样本
+          </label>
+          <button type="button" id="insp-generate">生成抽检清单</button>
+          <button type="button" id="insp-csv" class="secondary-mini" disabled>下载清单 CSV</button>
+        </div>
+        <div id="insp-status" class="insp-status muted">填写抽检张数后点击「生成抽检清单」。</div>
+        <div id="insp-table-wrap" class="stock-table-wrap" hidden>
+          <table class="stock-table insp-table">
+            <thead><tr>
+              <th>#</th><th>页码</th><th>页内序号</th><th>规格</th>
+              <th>左上角 X (mm)</th><th>左上角 Y (mm)</th><th>尺寸 (mm)</th>
+              <th>旋转</th><th>已有流水号</th>
+            </tr></thead>
+            <tbody id="insp-rows"></tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
     <!-- 纸张库存与领料（跨整行，显示在拼版结果下方） -->

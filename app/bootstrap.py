@@ -799,6 +799,145 @@ def main() -> int:
         migrated.close()
 
 
+    # ---- 印后抽检清单：页间轮流、页内均匀、占用区 / 未排入排除、CSV ----
+    from .inspection import build_inspection, build_inspection_csv
+    from .models import InspectionRequest
+    from .inspection import build_inspection_from_request
+
+    # 40×40 纸面、20×20 标签：每页 4 个，10 份共 3 页（4/4/2）
+    insp_base = LayoutRequest(
+        page_width=40, page_height=40,
+        labels=[LabelSpec(width=20, height=20, count=10, numbering=_num())],
+    )
+    insp_plan = compute_layout(insp_base)
+    assert [len(pg.labels) for pg in insp_plan.pages] == [4, 4, 2]
+
+    # 名额 6：轮流两轮后各页 2/2/2；页内 N=4 q=2 取第 2、4 个
+    insp6 = build_inspection(insp_plan, [6])
+    assert insp6.total_samples == 6
+    # 第 3 页 N=2 q=2 覆盖该页全部两个（全标签阅读序号 1、2）；
+    # 前两页 N=4 q=2 取第 2、4 个
+    p3 = sorted(it.page_index for it in insp6.items if it.page == 3)
+    assert p3 == [1, 2], p3
+    assert sorted(it.page_index for it in insp6.items if it.page in (1, 2)) == [2, 2, 4, 4]
+    # 清单携带已有流水号（按完整拼版的实际位置），并按页码 + 页内序号排序
+    assert all(it.serial is not None for it in insp6.items)
+    assert [(it.page, it.page_index) for it in insp6.items] == sorted(
+        (it.page, it.page_index) for it in insp6.items
+    )
+    s0 = insp6.summaries[0]
+    assert (s0.placed, s0.sampled, s0.pages_used) == (10, 6, 3)
+
+    # 名额 9：第三页只能容纳 2 个，继续轮流后为 4/3/2，共 9 个不重复
+    insp9 = build_inspection(insp_plan, [9])
+    per_page9 = {p: 0 for p in (1, 2, 3)}
+    for it in insp9.items:
+        per_page9[it.page] += 1
+    assert per_page9 == {1: 4, 2: 3, 3: 2}, per_page9
+    keys9 = [(it.page, it.page_index) for it in insp9.items]
+    assert len(keys9) == len(set(keys9)) == 9
+    # 首页 q=N=4：页内公式恰好覆盖全部 4 个位置
+    assert sorted(it.page_index for it in insp9.items if it.page == 1) == [1, 2, 3, 4]
+
+    # 名额 0：清单为空，允许
+    insp0 = build_inspection(insp_plan, [0])
+    assert insp0.items == [] and insp0.total_samples == 0
+    assert insp0.summaries[0].sampled == 0
+
+    # 名额超过实际排入数（未排入份数不进入候选）：明确中文错误
+    try:
+        build_inspection(insp_plan, [11])
+    except ValueError as exc:
+        assert "实际排入数 10" in str(exc) and "未排入" in str(exc), str(exc)
+    else:
+        raise AssertionError("抽验数超过实际排入数却未报错")
+
+    # 完全排不下：placed=0，名额只能为 0
+    insp_unfit = compute_layout(LayoutRequest(
+        page_width=40, page_height=40,
+        labels=[LabelSpec(name="巨签", width=80, height=80, count=3)],
+    ))
+    assert build_inspection(insp_unfit, [0]).items == []
+    try:
+        build_inspection(insp_unfit, [1])
+    except ValueError as exc:
+        assert "实际排入数 0" in str(exc), str(exc)
+    else:
+        raise AssertionError("全部未排入时不应允许抽验")
+
+    # 多规格独立分配：每种 count=4 时版面跨 2 页，每页 A/B 交错放置
+    # （全标签阅读顺序 A、B、A、B）。名额 A=2 在两页间轮流 → 每页 1 个，
+    # 页内 A 有 N=2 个候选、q=1 取第 2 个 → 全标签序号 3（A-002、A-004）；
+    # B=1 只落在第 1 页，取第 2 个 B → 全标签序号 4，serial 为 None。
+    insp_two_req = LayoutRequest(
+        page_width=40, page_height=40,
+        labels=[
+            LabelSpec(name="A", width=20, height=20, count=4,
+                      numbering=_num("A-", 1, 3)),
+            LabelSpec(name="B", width=20, height=20, count=4),
+        ],
+    )
+    insp_two = build_inspection(compute_layout(insp_two_req), [2, 1])
+    a_items = [it for it in insp_two.items if it.name == "A"]
+    b_items = [it for it in insp_two.items if it.name == "B"]
+    assert len(a_items) == 2 and len(b_items) == 1
+    assert [(it.page, it.page_index) for it in a_items] == [(1, 3), (2, 3)]
+    assert [it.serial for it in a_items] == ["A-002", "A-004"]
+    assert (b_items[0].page, b_items[0].page_index) == (1, 4)
+    assert b_items[0].serial is None
+
+    # 首张纸占用区：被占区域不是排入标签，候选仍只来自实际排入结果，
+    # 且续页标签可以被抽到（页间轮流覆盖多页）
+    insp_occ_req = LayoutRequest(
+        page_width=210, page_height=297,
+        margin_top=8, margin_right=8, margin_bottom=8, margin_left=8,
+        gap_x=2, gap_y=2,
+        labels=[LabelSpec(name="避让抽检", width=50, height=30, count=40,
+                          numbering=_num())],
+        occupied_zones=[OccupiedZone(x=48, y=48, width=100, height=100)],
+    )
+    insp_occ_plan = compute_layout(insp_occ_req)
+    assert len(insp_occ_plan.pages) >= 2
+    insp_occ = build_inspection(insp_occ_plan, [40])  # 全抽：恰好 40 个已排入标签
+    assert insp_occ.total_samples == 40
+    occ_keys = [(it.page, it.page_index) for it in insp_occ.items]
+    assert len(occ_keys) == len(set(occ_keys))
+    # 每个样本坐标都不在占用区内（占用区从不作为候选输出）
+    z = insp_occ_plan.occupied_zones[0]
+    for it in insp_occ.items:
+        if it.page != 1:
+            continue
+        assert not (
+            it.x < z.x + z.width and it.x + it.width > z.x
+            and it.y < z.y + z.height and it.y + it.height > z.y
+        ), f"抽检样本落入首页占用区: {it}"
+
+    # 请求入口：每次都用 params 重算完整拼版，不依赖外部已算结果
+    via_req = build_inspection_from_request(
+        InspectionRequest(params=insp_base, samples=[6])
+    )
+    assert [(it.page, it.page_index, it.serial) for it in via_req.items] == \
+        [(it.page, it.page_index, it.serial) for it in insp6.items]
+
+    # CSV：BOM、表头、行数、流水号 / 空值、坐标列齐全
+    csv_text = build_inspection_csv(insp_two)
+    assert csv_text.startswith("﻿")
+    assert "页码,页内序号,规格名称" in csv_text
+    assert csv_text.count("\r\n") == 1 + len(insp_two.items)
+    lines = csv_text.splitlines()
+    assert lines[0].lstrip("﻿").split(",") == [
+        "页码", "页内序号", "规格名称", "规格宽(mm)", "规格高(mm)",
+        "旋转90°", "左上角X(mm)", "左上角Y(mm)", "已有流水号",
+    ]
+    data_lines = lines[1:]
+    # A 规格行末列是流水号，B 规格（未编号）末列为空
+    a_lines = [ln for ln in data_lines if ",A," in ln]
+    b_lines = [ln for ln in data_lines if ",B," in ln]
+    assert len(a_lines) == 2 and all(ln.endswith(tuple(f"A-{i:03d}" for i in (1, 2, 3, 4))) for ln in a_lines)
+    assert len(b_lines) == 1 and b_lines[0].endswith(",")
+
+    print("[bootstrap] 印后抽检清单自检通过")
+
     print(f"[bootstrap] 自检通过（FastAPI {fastapi.__version__}, "
           f"Pydantic {pydantic.VERSION}）")
     print("[bootstrap] 初始化完成，等待 uvicorn 启动 ...")
